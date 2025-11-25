@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+[ "$1" ] || exec echo -e "还未指定搜索 man 手册页，请指定一个可用的 man 手册页名称。" >&2
+
+# 确认手册页是否存在
+man_not_found=false
+search="$(man -k ^"$1"$ 2>/dev/null)"
+(($?==0)) || {
+  man_not_found=true
+  man_search_path=`man -w "$1" 2>/dev/null`
+  if (($?==0));then
+    man_not_found=false
+    search="$(sed -n "$(($(sed -n '/.SH NAME/=' "$man_search_path")+1))p" "$man_search_path" | tr -d '\\')"
+  else
+    man_not_found=true
+  fi
+}
+
+# 直接退出
+if $man_not_found; then
+  echo -e "未找到 man 手册页 $1。" >&2
+  exit 1
+fi
+
+# 取得搜索结果
+search="$(head -1 <<< "$search")"
+search="$(echo $search)"
+
+# 取得手册页名称、简介、提示
+name="${search%' - '*}"
+name=${name%(*}
+name="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$name")"
+readme="${search#*' - '}"
+tip="$(source /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo "$name")"
+
+# 制作参考内容计算最长宽度
+content="$name
+$readme
+$(printf "%*s" 23)
+$tip"
+
+# 计算内容宽度
+width_low="$(wc -L <<< "$content")"
+width="$[width_low+2]"
+term_width="$(stty size -F /dev/tty 2>/dev/null | cut -d' ' -f2)"
+name_width="$(wc -L <<< "$name")"
+name_left_width="$(((width-name_width)/2))"
+name_right_width="$((width-name_width-name_left_width))"
+name_reset_width="$[name_right_width+name_left_width+name_width]"
+if ((name_reset_width<width_low));then
+  name_left_width="$((name_left_width+(width_low-name_reset_width)))"
+elif ((name_reset_width>width_low));then
+  name_left_width="$((name_left_width-(name_reset_width-width_low)))"
+fi
+readme_width="$(wc -L <<< "$readme")"
+tip_width="$(wc -L <<< "$tip")"
+__tip_content="按住 [W] 开始思索"
+__tip_width="$(wc -L <<< "$__tip_content")"
+
+# 格式化输出带有空缺的内容
+printf '\e[1;37m╭%*s╮\e[0m\n' "$width" | sed 's/ /─/g'
+printf '\e[1;37m│\e[0m %*s' "$name_left_width"
+printf '\e[1;97m%s\e[0m' "$name"
+printf '%*s \e[1;37m│\e[0m\n' "$name_right_width"
+printf '\e[1;37m│?%*s?│\e[0m\n\n' "$[width-2]" | sed 's/ /─/g;s/\?/ /g'
+printf '\e[1;37m│\e[0m \e[90m%s\e[0m%*s \e[1;37m│\e[0m\n' "$readme" "$[width-readme_width-2]"
+printf '\e[1;37m│\e[0m \e[3;34m%s\e[0m%*s \e[1;37m│\e[0m\n' "$tip" "$[width-tip_width-2]"
+printf '\e[1;37m╰%*s╯\e[0m\n' "$width" | sed 's/ /─/g'
+
+# 创建计数
+__count=0
+__total_count=21
+__col=4
+__total_col=7
+
+# 定义函数
+function __stty_on(){ stty echo -F /dev/tty 2>/dev/null;} # 开启回显
+function __stty_off(){ stty -echo -F /dev/tty 2>/dev/null;} # 关闭回显
+
+# 退出时清理屏幕
+function __clear(){
+  __stty_on
+  printf "\e[?25h"
+  printf "\e[%sB" "$__col"
+  for ((i=0;i<__total_col;i++));do
+    printf "\e[A\r\e[K"
+  done
+}
+
+# 主循环，处理长按思索
+trap __clear 2
+__stty_off
+printf "\e[?25l"
+printf "\e[%sA" "$__col"
+while true;do
+  ponder=false
+  read -srn1 -t0.001 key </dev/tty
+  [ "$key" ] && key_found=true || key_found=false
+  case "$key" in
+    $'\e'*)
+      break=exit
+      break
+      ;;
+    [wW])
+      # 系统在处理重复输入时会有大约 0.5 秒的延迟，因此在初步判断时需要增加延迟，避免闪烁带来的违和感
+      ((__count==0)) && sleep 0.5
+      ponder=true
+      ((__count==__total_count)) && { break=done;break;} || let __count++
+      ;;
+  esac
+  $ponder || { ((__count==0)) || let __count--;}
+  if ((__count==0));then
+    printf "\r"
+    printf "\e[1;37m│\e[0m %s%*s \e[1;37m│\e[0m" "$__tip_content" "$[width-__tip_width-2]"
+  else
+    printf "\r"
+    printf -v ponder_1 "\e[1;37m│\e[0m?\e[1;97m%*s\e[0m" "$__count"
+    printf -v ponder_2 "%*s" "$[__total_count-__count]"
+    ponder_1="${ponder_1//' '/'┃'}"
+    ponder_1="${ponder_1//'?'/' '}"
+    ponder_2="${ponder_2//' '/'|'}"
+    echo -en "$ponder_1$ponder_2"
+    printf "%*s\e[1;37m│\e[0m" "$[width-__total_count-1]"
+  fi
+  sleep 0.03
+done
+
+# 处理结束后进行相应操作
+case "$break" in
+  exit)__clear;exit;;
+  done)__clear;__stty_off;man "$1";__stty_on;;
+esac
